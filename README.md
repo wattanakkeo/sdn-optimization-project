@@ -5,7 +5,6 @@ This is a software defined networking traffic optimization project running on th
 # How to set up
 1. Update the system by using:\
 sudo apt update\
-AND\
 sudo apt upgrade -y
 3. Install Mininet using:\
 sudo apt install mininet -y
