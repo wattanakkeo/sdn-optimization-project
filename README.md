@@ -3,7 +3,7 @@
 This is a software defined networking traffic optimization project running on the Ryu framework. We created a custom switch that maps the shortest path based on the current network topology with Dijkstra's algorithm.
 
 # How to set up
-1. Update the system
+1. Update the system \n
 sudo apt update && sudo apt upgrade -y
 2. Install Mininet
 sudo apt install mininet -y
