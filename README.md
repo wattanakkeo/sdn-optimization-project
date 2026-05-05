@@ -16,3 +16,9 @@ sudo apt install python3 python3-pip -y
 pip3 install ryu
 8. Then clone this repository:\
 git clone https://github.com/wattanakkeo/sdn-optimization-project.git
+9. Open the sdn-optimization-project folder:\
+cd sdn-optimization-project
+10. Run one of the programs by doing either:\
+sudo ryu-manager app.dijkstra_routing_switch.py\
+OR\
+sudo ryu-manager app.dijkstra_routing_switch_with_timeout.py
