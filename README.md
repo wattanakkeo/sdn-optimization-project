@@ -22,3 +22,11 @@ cd sdn-optimization-project
 sudo ryu-manager app.dijkstra_routing_switch.py\
 OR\
 sudo ryu-manager app.dijkstra_routing_switch_with_timeout.py
+
+# What's happening under the hood
+1. A packet is sent
+2. Switch doesn't know what to do
+3. It asks the controller
+4. The code runs Dijkstra's
+5. Controller installs flow rules
+6. Next packets run locally
