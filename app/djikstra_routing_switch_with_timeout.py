@@ -1,5 +1,6 @@
 """
-Runs Dijkstra but also includes a flow rule timeout to help with traffic and pathing.
+Runs Dijkstra but includes a flow timeout rule to help with pathing
+
 """
 
 import heapq
@@ -117,29 +118,31 @@ class ShortestPath13(app_manager.RyuApp):
         )
         datapath.send_msg(out)
 
-    """Displays information about a flow that was removed"""
     @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
     def flow_removed_handler(self, ev):
+        """Displays information about a flow that was removed"""
         msg = ev.msg
         datapath = msg.datapath
+        dpid = datapath.id
+        reason = msg.reason
         ofproto = datapath.ofproto
         
-        removal_Reason= {
-            ofproto.OFPRR_IDLE_TIMEOUT: 'Inactive for 15s',
-            ofproto.OFPRR_HARD_TIMEOUT: '30s since flow was added',
+        removal_reason= {
+            ofproto.OFPRR_IDLE_TIMEOUT: 'Idle Timeout',
+            ofproto.OFPRR_HARD_TIMEOUT: 'Hard Timeout',
         }
-        reason_str = removal_Reason.get(reason, 'UNKNOWN')
+        reason_str = removal_reason.get(reason, 'UNKNOWN')
 
         byte_count = msg.byte_count
         packet_count = msg.packet_count
-        duration = msg.duration
+        duration_sec = msg.duration_sec
 
         self.logger.info(
             "Flow removed: dpid=%016x reason=%s packets=%d bytes=%d duration=%ds",
-            dpid, reason_str, packet_count, byte_count, duration,
+            dpid, reason_str, packet_count, byte_count, duration_sec,
         )
 
-        self._evaluate_expired_flow(dpid, reason, byte_count, duration)
+        self._evaluate_expired_flow(dpid, reason, byte_count, duration_sec)
 
     # Dijkstra
     def dijkstra(self, src_dpid):
@@ -158,9 +161,9 @@ class ShortestPath13(app_manager.RyuApp):
                 if a != u:
                     continue
 
-                if b in self.possible_traffic: # if the flow has heavy traffic +3 hop cost
+                if b in self.possible_traffic: # if the flow has heavy traffic, +3 hop cost
                     penalty = 3
-                else:                       # if the flow doesn't have heavy traffic +1 hop cost
+                else:                       # if the flow doesn't have heavy traffic, +1 hop cost
                     penalty = 1 
 
                 new_cost = dist[u] + penalty
@@ -188,13 +191,14 @@ class ShortestPath13(app_manager.RyuApp):
         return []
 
     # Helpers methods
-    """Sets up flow and has it terminated when inactive for 15s or when 30s have passed since flow was added"""
     def _add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=15,hard_timeout=30):
+        """Sets up flow and has it terminated when inactive for 15s or when 30s have passed since flow was added"""
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         kwargs = dict(datapath=datapath, priority=priority,
-                      match=match, instructions=inst,
+                      match=match, instructions=inst, 
+                      idle_timeout=idle_timeout, hard_timeout=hard_timeout,
                       flags=ofproto.OFPFF_SEND_FLOW_REM)
         if buffer_id is not None:
             kwargs['buffer_id'] = buffer_id
@@ -230,23 +234,23 @@ class ShortestPath13(app_manager.RyuApp):
                     "No path from %016x to %016x", src_dpid, dst_dpid
                 )
 
-    """Determines if a flow would be considered high traffic or not"""
-    def _evaluate_expired_flow(self, dpid, reason, byte_count, duration):
+    def _evaluate_expired_flow(self, dpid, reason, byte_count, duration_sec):
+        """Determines if a flow would be considered high traffic or not"""
         ofproto = self.datapaths[dpid].ofproto
         traffic_threshold = 100_000
 
         if reason != ofproto.OFPRR_IDLE_TIMEOUT:
             return
 
-        if duration == 0:
+        if duration_sec == 0:
             return
 
-        bytes_per_sec = byte_count / duration
+        bytes_per_sec = byte_count / duration_sec
 
         if bytes_per_sec > traffic_threshold:
             self.logger.warning(
                 "High-traffic flow expired on dpid=%016x: %.2f KB/s over %ds",
-                dpid, bytes_per_sec / 1000, duration,
+                dpid, bytes_per_sec / 1000, duration_sec,
             )
             self.possible_traffic.add(dpid)
         else:
