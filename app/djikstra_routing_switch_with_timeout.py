@@ -1,8 +1,5 @@
 """
-Runs Dijkstra on every packetin to compute the shortest path.
-
-Run:
-    ryu-manager ryu/app/shortest_path_13.py --observe-links
+Runs Dijkstra but also includes a flow rule timeout to help with traffic and pathing.
 """
 
 import heapq
