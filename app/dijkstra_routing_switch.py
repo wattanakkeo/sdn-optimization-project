@@ -26,6 +26,9 @@ class ShortestPath13(app_manager.RyuApp):
         self.datapaths = {}
         # adjacency[(src_dpid, dst_dpid)] = out_port on src toward dst
         self.adjacency = {}
+        # mac_to_port[dpid][mac] = port number the mac was seen on
+        self.mac_to_port = {}
+
 
     # Topology event handlers
 
@@ -34,6 +37,7 @@ class ShortestPath13(app_manager.RyuApp):
         switch = ev.switch
         dpid = switch.dp.id
         self.datapaths[dpid] = switch.dp
+        self.mac_to_port.setdefault(dpid, {})
         self.logger.info("Switch connected: dpid=%016x", dpid)
         self._log_topology()
 
@@ -41,6 +45,7 @@ class ShortestPath13(app_manager.RyuApp):
     def switch_leave_handler(self, ev):
         dpid = ev.switch.dp.id
         self.datapaths.pop(dpid, None)
+        self.mac_to_port.pop(dpid, None)
         # Remove all adjacency entries involving this switch
         self.adjacency = {
             k: v for k, v in self.adjacency.items()
@@ -103,11 +108,68 @@ class ShortestPath13(app_manager.RyuApp):
             "PacketIn dpid=%016x port=%d src=%s dst=%s",
             src_dpid, in_port, src_mac, dst_mac,
         )
+        
+        self.mac_to_port.setdefault(src_dpid, {})[src_mac] = in_port
 
-        # compute the path and log it 
-        self._compute_and_log_paths(src_dpid)
+        # try to forward via shortest path instead of flooding
+        dst_dpid = self._find_dpid_for_mac(dst_mac)
 
-        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+        if dst_dpid is None:
+            # Destination unknown flood so the host can reply and be learned
+            self.logger.info("dst MAC %s unknown, flooding", dst_mac)
+            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+        else:
+            # We know where the destination is; compute the shortest path and
+            # install one flow rule per switch along the path.
+            path = self.get_path(src_dpid, dst_dpid)
+            self.logger.info(
+                "Path %016x -> %016x: %s",
+                src_dpid, dst_dpid,
+                ' -> '.join('%016x' % d for d in path) if path else 'NONE',
+            )
+
+            if not path:
+                # No path found, fall back to flood
+                actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+            else:
+                # install a flow on every intermediate switch
+                # For each hop except the last, the outport comes from adjacency.
+                for i in range(len(path) - 1):
+                    hop_dpid = path[i]
+                    next_dpid = path[i + 1]
+                    out_port = self.adjacency[(hop_dpid, next_dpid)]
+                    hop_dp = self.datapaths[hop_dpid]
+                    hop_parser = hop_dp.ofproto_parser
+                    match = hop_parser.OFPMatch(eth_dst=dst_mac)
+                    flow_actions = [hop_parser.OFPActionOutput(out_port)]
+                    self._add_flow(hop_dp, 1, match, flow_actions)
+                    self.logger.info(
+                        "Flow installed: dpid=%016x out_port=%d dst=%s",
+                        hop_dpid, out_port, dst_mac,
+                    )
+
+                # install a flow on the last switch to the host port ***
+                last_dpid = path[-1]
+                host_port = self.mac_to_port[last_dpid][dst_mac]
+                last_dp = self.datapaths[last_dpid]
+                last_parser = last_dp.ofproto_parser
+                match = last_parser.OFPMatch(eth_dst=dst_mac)
+                flow_actions = [last_parser.OFPActionOutput(host_port)]
+                self._add_flow(last_dp, 1, match, flow_actions)
+                self.logger.info(
+                    "Flow installed (last hop): dpid=%016x out_port=%d dst=%s",
+                    last_dpid, host_port, dst_mac,
+                )
+
+                # Determine the outport for the current packet on this switch
+                if len(path) == 1:
+                    out_port = host_port
+                else:
+                    out_port = self.adjacency[(src_dpid, path[1])]
+
+                actions = [parser.OFPActionOutput(out_port)]
+
+        # Send the current packet out
         data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
         out = parser.OFPPacketOut(
             datapath=datapath,
@@ -198,3 +260,9 @@ class ShortestPath13(app_manager.RyuApp):
                 self.logger.info(
                     "No path from %016x to %016x", src_dpid, dst_dpid
                 )
+                
+    def _find_dpid_for_mac(self, mac):
+        for dpid, mac_table in self.mac_to_port.items():
+            if mac in mac_table:
+                return dpid
+        return None
