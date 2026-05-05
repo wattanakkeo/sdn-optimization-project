@@ -195,7 +195,7 @@ class ShortestPath13(app_manager.RyuApp):
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         kwargs = dict(datapath=datapath, priority=priority,
                       match=match, instructions=inst,
-                      flags=ofproto.OPFF_SEND_FLOW_REM)
+                      flags=ofproto.OFPFF_SEND_FLOW_REM)
         if buffer_id is not None:
             kwargs['buffer_id'] = buffer_id
         datapath.send_msg(parser.OFPFlowMod(**kwargs))
