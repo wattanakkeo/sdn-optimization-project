@@ -95,7 +95,10 @@ class ShortestPath13(app_manager.RyuApp):
         in_port = msg.match['in_port']
 
         pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocols(ethernet.ethernet)[0]
+        eth_list = pkt.get_protocols(ethernet.ethernet)
+        if not eth_list:
+            return
+        eth = eth_list[0]
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             return  # handled by topology module
@@ -109,7 +112,16 @@ class ShortestPath13(app_manager.RyuApp):
             src_dpid, in_port, src_mac, dst_mac,
         )
         
-        self.mac_to_port.setdefault(src_dpid, {})[src_mac] = in_port
+        # Only record the MAC if this port is a hostfacing port, not an
+        # interswitch link. Flooding causes intermediate switches to see the
+        # source MAC arrive on the uplink port, which would create a phantom
+        # entry and break last-hop delivery.
+        inter_switch_ports = {
+            port for (dpid, _), port in self.adjacency.items()
+            if dpid == src_dpid
+        }
+        if in_port not in inter_switch_ports:
+            self.mac_to_port.setdefault(src_dpid, {})[src_mac] = in_port
 
         # try to forward via shortest path instead of flooding
         dst_dpid = self._find_dpid_for_mac(dst_mac)
@@ -132,42 +144,51 @@ class ShortestPath13(app_manager.RyuApp):
                 # No path found, fall back to flood
                 actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
             else:
-                # install a flow on every intermediate switch
-                # For each hop except the last, the outport comes from adjacency.
-                for i in range(len(path) - 1):
-                    hop_dpid = path[i]
-                    next_dpid = path[i + 1]
-                    out_port = self.adjacency[(hop_dpid, next_dpid)]
-                    hop_dp = self.datapaths[hop_dpid]
-                    hop_parser = hop_dp.ofproto_parser
-                    match = hop_parser.OFPMatch(eth_dst=dst_mac)
-                    flow_actions = [hop_parser.OFPActionOutput(out_port)]
-                    self._add_flow(hop_dp, 1, match, flow_actions)
+                try:
+                    # install a flow on every intermediate switch
+                    # For each hop except the last, the outport comes from adjacency.
+                    for i in range(len(path) - 1):
+                        hop_dpid = path[i]
+                        next_dpid = path[i + 1]
+                        out_port = self.adjacency[(hop_dpid, next_dpid)]
+                        hop_dp = self.datapaths[hop_dpid]
+                        hop_parser = hop_dp.ofproto_parser
+                        match = hop_parser.OFPMatch(eth_dst=dst_mac)
+                        flow_actions = [hop_parser.OFPActionOutput(out_port)]
+                        self._add_flow(hop_dp, 1, match, flow_actions)
+                        self.logger.info(
+                            "Flow installed: dpid=%016x out_port=%d dst=%s",
+                            hop_dpid, out_port, dst_mac,
+                        )
+
+                    # install a flow on the last switch to the host port
+                    last_dpid = path[-1]
+                    host_port = self.mac_to_port[last_dpid][dst_mac]
+                    last_dp = self.datapaths[last_dpid]
+                    last_parser = last_dp.ofproto_parser
+                    match = last_parser.OFPMatch(eth_dst=dst_mac)
+                    flow_actions = [last_parser.OFPActionOutput(host_port)]
+                    self._add_flow(last_dp, 1, match, flow_actions)
                     self.logger.info(
-                        "Flow installed: dpid=%016x out_port=%d dst=%s",
-                        hop_dpid, out_port, dst_mac,
+                        "Flow installed (last hop): dpid=%016x out_port=%d dst=%s",
+                        last_dpid, host_port, dst_mac,
                     )
 
-                # install a flow on the last switch to the host port ***
-                last_dpid = path[-1]
-                host_port = self.mac_to_port[last_dpid][dst_mac]
-                last_dp = self.datapaths[last_dpid]
-                last_parser = last_dp.ofproto_parser
-                match = last_parser.OFPMatch(eth_dst=dst_mac)
-                flow_actions = [last_parser.OFPActionOutput(host_port)]
-                self._add_flow(last_dp, 1, match, flow_actions)
-                self.logger.info(
-                    "Flow installed (last hop): dpid=%016x out_port=%d dst=%s",
-                    last_dpid, host_port, dst_mac,
-                )
+                    # Determine the outport for the current packet on this switch
+                    if len(path) == 1:
+                        out_port = host_port
+                    else:
+                        out_port = self.adjacency[(src_dpid, path[1])]
 
-                # Determine the outport for the current packet on this switch
-                if len(path) == 1:
-                    out_port = host_port
-                else:
-                    out_port = self.adjacency[(src_dpid, path[1])]
+                    actions = [parser.OFPActionOutput(out_port)]
 
-                actions = [parser.OFPActionOutput(out_port)]
+                except KeyError as e:
+                    # Topology changed mid-handler (link/switch removed). Fall
+                    # back to flood so the packet is not silently dropped.
+                    self.logger.warning(
+                        "Path install aborted (KeyError: %s), flooding", e
+                    )
+                    actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
 
         # Send the current packet out
         data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
