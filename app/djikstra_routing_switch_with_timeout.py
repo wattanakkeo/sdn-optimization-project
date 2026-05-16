@@ -192,7 +192,7 @@ class ShortestPath13(app_manager.RyuApp):
 
     # Helpers methods
     def _add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=15,hard_timeout=30):
-        """Sets up flow and has it terminated when inactive for 15s or when 30s have passed since flow was added"""
+        """Sets up flow"""
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
